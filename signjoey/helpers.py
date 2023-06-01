@@ -141,11 +141,11 @@ def log_data_info(
         )
     )
 
-    logging_function(
+    """ logging_function(
         "First training example:\n\t[GLS] {}\n\t[TXT] {}".format(
             " ".join(vars(train_data[0])["gls"]), " ".join(vars(train_data[0])["txt"])
         )
-    )
+    ) """
 
     logging_function(
         "First 10 words (gls): {}".format(
@@ -183,6 +183,15 @@ def bpe_postprocess(string) -> str:
     """
     return string.replace("@@ ", "")
 
+def subword_postprocess(string) -> str:
+
+    """
+    Post-processor for BPE output. Recombines BPE-split tokens.
+
+    :param string:
+    :return: post-processed string
+    """
+    return string.replace("▁", " ").strip()
 
 def get_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     """

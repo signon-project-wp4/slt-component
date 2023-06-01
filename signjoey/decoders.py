@@ -12,7 +12,8 @@ from signjoey.attention import BahdanauAttention, LuongAttention
 from signjoey.encoders import Encoder
 from signjoey.helpers import freeze_params, subsequent_mask
 from signjoey.transformer_layers import PositionalEncoding, TransformerDecoderLayer
-
+from transformers import AutoModelForSeq2SeqLM
+from transformers.adapters import PfeifferInvConfig
 
 # pylint: disable=abstract-method
 class Decoder(nn.Module):
@@ -458,6 +459,7 @@ class RecurrentDecoder(Decoder):
 
 # pylint: disable=arguments-differ,too-many-arguments
 # pylint: disable=too-many-instance-attributes, unused-argument
+
 class TransformerDecoder(Decoder):
     """
     A transformer decoder with N masked layers.
@@ -466,6 +468,7 @@ class TransformerDecoder(Decoder):
 
     def __init__(
         self,
+        tokeniser,
         num_layers: int = 4,
         num_heads: int = 8,
         hidden_size: int = 512,
@@ -493,31 +496,25 @@ class TransformerDecoder(Decoder):
 
         self._hidden_size = hidden_size
         self._output_size = vocab_size
+        self.encoder_output_size = hidden_size
 
-        # create num_layers decoder layers and put them in a list
-        self.layers = nn.ModuleList(
-            [
-                TransformerDecoderLayer(
-                    size=hidden_size,
-                    ff_size=ff_size,
-                    num_heads=num_heads,
-                    dropout=dropout,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-
-        self.pe = PositionalEncoding(hidden_size)
-        self.layer_norm = nn.LayerNorm(hidden_size, eps=1e-6)
-
-        self.emb_dropout = nn.Dropout(p=emb_dropout)
-        self.output_layer = nn.Linear(hidden_size, vocab_size, bias=False)
-
-        if freeze:
-            freeze_params(self)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+        
+        if kwargs['use_adapters']:
+            config = PfeifferInvConfig(
+                mh_adapter=True,
+                output_adapter=False,
+                reduction_factor=4,
+                inv_adapter_reduction_factor=4, 
+                non_linearity="gelu",
+                cross_adapter=False,    
+            )
+            self.model.add_adapter("bottleneck_adapter", config=config, set_active=True)
+            self.model.train_adapter('bottleneck_adapter')
 
     def forward(
         self,
+        encoder_input: Tensor,
         trg_embed: Tensor = None,
         encoder_output: Tensor = None,
         encoder_hidden: Tensor = None,
@@ -525,6 +522,7 @@ class TransformerDecoder(Decoder):
         unroll_steps: int = None,
         hidden: Tensor = None,
         trg_mask: Tensor = None,
+        labels = None,
         **kwargs
     ):
         """
@@ -541,24 +539,16 @@ class TransformerDecoder(Decoder):
         :param kwargs:
         :return:
         """
-        assert trg_mask is not None, "trg_mask required for Transformer"
-
-        x = self.pe(trg_embed)  # add position encoding to word embedding
-        x = self.emb_dropout(x)
-
-        trg_mask = trg_mask & subsequent_mask(trg_embed.size(1)).type_as(trg_mask)
-
-        for layer in self.layers:
-            x = layer(x=x, memory=encoder_output, src_mask=src_mask, trg_mask=trg_mask)
-
-        x = self.layer_norm(x)
-        output = self.output_layer(x)
-
-        return output, x, None, None
-
-    def __repr__(self):
-        return "%s(num_layers=%r, num_heads=%r)" % (
-            self.__class__.__name__,
-            len(self.layers),
-            self.layers[0].trg_trg_att.num_heads,
+       
+        output = self.model(
+            inputs_embeds=encoder_input,
+            attention_mask=src_mask.squeeze(dim=1),
+            decoder_inputs_embeds=trg_embed,
+            decoder_attention_mask=trg_mask.squeeze(dim=1) if len(trg_mask.size()) == 3 else trg_mask,
+            labels=labels
         )
+     
+        return output.logits, trg_embed, None, None 
+    
+    def __repr__(self):
+        return ''

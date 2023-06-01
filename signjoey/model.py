@@ -4,6 +4,7 @@ import tensorflow as tf
 tf.config.set_visible_devices([], "GPU")
 
 import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -33,6 +34,7 @@ class SignModel(nn.Module):
 
     def __init__(
         self,
+        tokeniser,
         encoder: Encoder,
         gloss_output_layer: nn.Module,
         decoder: Decoder,
@@ -66,10 +68,10 @@ class SignModel(nn.Module):
         self.gls_vocab = gls_vocab
         self.txt_vocab = txt_vocab
 
-        self.txt_bos_index = self.txt_vocab.stoi[BOS_TOKEN]
-        self.txt_pad_index = self.txt_vocab.stoi[PAD_TOKEN]
-        self.txt_eos_index = self.txt_vocab.stoi[EOS_TOKEN]
-
+        self.txt_bos_index = tokeniser.bos_id() 
+        self.txt_pad_index = tokeniser.pad_id() 
+        self.txt_eos_index = tokeniser.eos_id() 
+     
         self.gloss_output_layer = gloss_output_layer
         self.do_recognition = do_recognition
         self.do_translation = do_translation
@@ -94,27 +96,19 @@ class SignModel(nn.Module):
         :param txt_mask: target mask
         :return: decoder outputs
         """
-        encoder_output, encoder_hidden = self.encode(
-            sgn=sgn, sgn_mask=sgn_mask, sgn_length=sgn_lengths
+        embedded_sgn, _ = self.encode(
+            sgn=sgn,
+            sgn_mask=sgn_mask,
+            sgn_length=sgn_lengths
         )
 
-        if self.do_recognition:
-            # Gloss Recognition Part
-            # N x T x C
-            gloss_scores = self.gloss_output_layer(encoder_output)
-            # N x T x C
-            gloss_probabilities = gloss_scores.log_softmax(2)
-            # Turn it into T x N x C
-            gloss_probabilities = gloss_probabilities.permute(1, 0, 2)
-        else:
-            gloss_probabilities = None
+        gloss_probabilities = None
 
         if self.do_translation:
             unroll_steps = txt_input.size(1)
             decoder_outputs = self.decode(
-                encoder_output=encoder_output,
-                encoder_hidden=encoder_hidden,
-                sgn_mask=sgn_mask,
+                encoder_input=embedded_sgn,
+                src_mask=sgn_mask,
                 txt_input=txt_input,
                 unroll_steps=unroll_steps,
                 txt_mask=txt_mask,
@@ -143,9 +137,8 @@ class SignModel(nn.Module):
 
     def decode(
         self,
-        encoder_output: Tensor,
-        encoder_hidden: Tensor,
-        sgn_mask: Tensor,
+        encoder_input: Tensor,
+        src_mask: Tensor,
         txt_input: Tensor,
         unroll_steps: int,
         decoder_hidden: Tensor = None,
@@ -163,11 +156,13 @@ class SignModel(nn.Module):
         :param txt_mask: mask for spoken language words
         :return: decoder outputs (outputs, hidden, att_probs, att_vectors)
         """
+        
+        decoder_input_embeddings = self.txt_embed(x=txt_input, mask=txt_mask)
+
         return self.decoder(
-            encoder_output=encoder_output,
-            encoder_hidden=encoder_hidden,
-            src_mask=sgn_mask,
-            trg_embed=self.txt_embed(x=txt_input, mask=txt_mask),
+            encoder_input=encoder_input,
+            src_mask=src_mask,
+            trg_embed=decoder_input_embeddings,
             trg_mask=txt_mask,
             unroll_steps=unroll_steps,
             hidden=decoder_hidden,
@@ -254,7 +249,7 @@ class SignModel(nn.Module):
             stacked_attention_scores: attention scores for batch
         """
 
-        encoder_output, encoder_hidden = self.encode(
+        embedded_sgn, encoder_hidden = self.encode(
             sgn=batch.sgn, sgn_mask=batch.sgn_mask, sgn_length=batch.sgn_lengths
         )
 
@@ -298,8 +293,8 @@ class SignModel(nn.Module):
             # greedy decoding
             if translation_beam_size < 2:
                 stacked_txt_output, stacked_attention_scores = greedy(
-                    encoder_hidden=encoder_hidden,
-                    encoder_output=encoder_output,
+                    encoder_hidden=None,
+                    encoder_input=embedded_sgn,
                     src_mask=batch.sgn_mask,
                     embed=self.txt_embed,
                     bos_index=self.txt_bos_index,
@@ -312,7 +307,7 @@ class SignModel(nn.Module):
                 stacked_txt_output, stacked_attention_scores = beam_search(
                     size=translation_beam_size,
                     encoder_hidden=encoder_hidden,
-                    encoder_output=encoder_output,
+                    encoder_input=embedded_sgn,
                     src_mask=batch.sgn_mask,
                     embed=self.txt_embed,
                     max_output_length=translation_max_output_length,
@@ -351,6 +346,7 @@ class SignModel(nn.Module):
 
 def build_model(
     cfg: dict,
+    tokeniser,
     sgn_dim: int,
     gls_vocab: GlossVocabulary,
     txt_vocab: TextVocabulary,
@@ -368,6 +364,8 @@ def build_model(
     :param do_recognition: flag to build the model with recognition output.
     :param do_translation: flag to build the model with translation decoder.
     """
+    data_cfg = cfg["data"]
+    cfg = cfg["model"]
 
     txt_padding_idx = txt_vocab.stoi[PAD_TOKEN]
 
@@ -375,6 +373,7 @@ def build_model(
         **cfg["encoder"]["embeddings"],
         num_heads=cfg["encoder"]["num_heads"],
         input_size=sgn_dim,
+        data_cfg=data_cfg,
     )
 
     # build encoder
@@ -398,13 +397,6 @@ def build_model(
             emb_dropout=enc_emb_dropout,
         )
 
-    if do_recognition:
-        gloss_output_layer = nn.Linear(encoder.output_size, len(gls_vocab))
-        if cfg["encoder"].get("freeze", False):
-            freeze_params(gloss_output_layer)
-    else:
-        gloss_output_layer = None
-
     # build decoder and word embeddings
     if do_translation:
         txt_embed: Union[Embeddings, None] = Embeddings(
@@ -417,6 +409,7 @@ def build_model(
         dec_emb_dropout = cfg["decoder"]["embeddings"].get("dropout", dec_dropout)
         if cfg["decoder"].get("type", "recurrent") == "transformer":
             decoder = TransformerDecoder(
+                tokeniser=tokeniser,
                 **cfg["decoder"],
                 encoder=encoder,
                 vocab_size=len(txt_vocab),
@@ -435,7 +428,15 @@ def build_model(
         txt_embed = None
         decoder = None
 
+    if do_recognition:
+        gloss_output_layer = nn.Linear(decoder.encoder_output_size, len(gls_vocab))
+        if cfg["encoder"].get("freeze", False):
+            freeze_params(gloss_output_layer)
+    else:
+        gloss_output_layer = None
+
     model: SignModel = SignModel(
+        tokeniser=tokeniser,
         encoder=encoder,
         gloss_output_layer=gloss_output_layer,
         decoder=decoder,
@@ -447,20 +448,21 @@ def build_model(
         do_translation=do_translation,
     )
 
-    if do_translation:
-        # tie softmax layer with txt embeddings
-        if cfg.get("tied_softmax", False):
-            # noinspection PyUnresolvedReferences
-            if txt_embed.lut.weight.shape == model.decoder.output_layer.weight.shape:
-                # (also) share txt embeddings and softmax layer:
-                # noinspection PyUnresolvedReferences
-                model.decoder.output_layer.weight = txt_embed.lut.weight
-            else:
-                raise ValueError(
-                    "For tied_softmax, the decoder embedding_dim and decoder "
-                    "hidden_size must be the same."
-                    "The decoder must be a Transformer."
-                )
+    embeddings = torch.as_tensor(np.load(cfg["pretrained_embeddings_path"]))
+    new_embeddings = torch.nn.Embedding(embeddings.shape[0], embeddings.shape[1])
+    new_embeddings.weight.data = embeddings
+    new_embeddings.padding_idx = embeddings.shape[1]
+    txt_embed.lut = new_embeddings
+    for param in txt_embed.parameters():
+        param.requires_grad = False
+  
+    with torch.no_grad():
+        decoder.model.lm_head = torch.nn.Linear(embeddings.shape[1], embeddings.shape[0], bias=False)
+        decoder.model.lm_head.weight.copy_(embeddings.clone())
+        decoder.model.final_logits_bias = torch.as_tensor(np.load(cfg["pretrained_embeddings_bias_path"]))
+        decoder.model.final_logits_bias.requires_grad = False
+        for param in decoder.model.lm_head.parameters():
+            param.requires_grad = False
 
     # custom initialization of model parameters
     initialize_model(model, cfg, txt_padding_idx)

@@ -2,19 +2,23 @@
 """
 Data module
 """
+from sklearn.preprocessing import normalize
 from torchtext import data
 from torchtext.data import Field, RawField
 from typing import List, Tuple
+from tqdm import tqdm   
+import numpy as np
 import pickle
 import gzip
 import torch
-
+import json
+import glob
+import h5py
 
 def load_dataset_file(filename):
     with gzip.open(filename, "rb") as f:
         loaded_object = pickle.load(f)
         return loaded_object
-
 
 class SignTranslationDataset(data.Dataset):
     """Defines a dataset for machine translation."""
@@ -25,8 +29,12 @@ class SignTranslationDataset(data.Dataset):
 
     def __init__(
         self,
+        cfg,
         path: str,
+        split,
+        tokeniser,
         fields: Tuple[RawField, RawField, Field, Field, Field],
+        training=False,
         **kwargs
     ):
         """Create a SignTranslationDataset given paths and fields.
@@ -46,47 +54,43 @@ class SignTranslationDataset(data.Dataset):
                 ("sgn", fields[2]),
                 ("gls", fields[3]),
                 ("txt", fields[4]),
+                ("txt_mask", fields[5]),
             ]
 
-        if not isinstance(path, list):
-            path = [path]
+      
+        langs = ["nl_XX", "en_XX", "es_XX"]
+        annotations = ["annotation"]
 
         samples = {}
-        for annotation_file in path:
-            tmp = load_dataset_file(annotation_file)
-            for s in tmp:
-                seq_id = s["name"]
-                if seq_id in samples:
-                    assert samples[seq_id]["name"] == s["name"]
-                    assert samples[seq_id]["signer"] == s["signer"]
-                    assert samples[seq_id]["gloss"] == s["gloss"]
-                    assert samples[seq_id]["text"] == s["text"]
-                    samples[seq_id]["sign"] = torch.cat(
-                        [samples[seq_id]["sign"], s["sign"]], axis=1
-                    )
-                else:
-                    samples[seq_id] = {
-                        "name": s["name"],
-                        "signer": s["signer"],
-                        "gloss": s["gloss"],
-                        "text": s["text"],
-                        "sign": s["sign"],
-                    }
+        with open(path, 'r') as f:
+            samples = json.load(f)
 
+        h5_spatial = h5py.File(cfg["embedding_file_spatial"], 'r')
         examples = []
-        for s in samples:
-            sample = samples[s]
-            examples.append(
-                data.Example.fromlist(
-                    [
-                        sample["name"],
-                        sample["signer"],
-                        # This is for numerical stability
-                        sample["sign"] + 1e-8,
-                        sample["gloss"].strip(),
-                        sample["text"].strip(),
-                    ],
-                    fields,
+
+        for sequence_id in tqdm(split):
+            sample = samples[str(sequence_id)]
+            video_id = sample["video_id"]
+            embeddings = np.asarray(h5_spatial[str(sequence_id)])
+       
+            for i, k in enumerate(annotations): # can include more languages
+                sentence = sample[k]
+                tgt_lang = langs[i]
+                inputs, mask = tokeniser.encode(sentence.strip(), add_special_tokens=True, tgt_lang=tgt_lang)
+ 
+                examples.append(
+                    data.Example.fromlist(
+                        [
+                            sample["video_id"],
+                            0,
+                            torch.from_numpy(embeddings),
+                            "",
+                            inputs,
+                            mask
+                        ],
+                        fields,
+                    )
                 )
-            )
+            
+        h5_spatial.close()
         super().__init__(examples, fields, **kwargs)

@@ -189,26 +189,27 @@ class TransformerEncoder(Encoder):
         super(TransformerEncoder, self).__init__()
 
         # build all (num_layers) layers
-        self.layers = nn.ModuleList(
-            [
-                TransformerEncoderLayer(
-                    size=hidden_size,
-                    ff_size=ff_size,
-                    num_heads=num_heads,
-                    dropout=dropout,
-                )
-                for _ in range(num_layers)
-            ]
-        )
+#Adrianek komentatuta
+#        self.layers = nn.ModuleList(
+#            [
+#                TransformerEncoderLayer(
+#                    size=hidden_size,
+#                    ff_size=ff_size,
+#                    num_heads=num_heads,
+#                    dropout=dropout,
+#                )
+#                for _ in range(num_layers)
+#            ]
+#        )
 
-        self.layer_norm = nn.LayerNorm(hidden_size, eps=1e-6)
-        self.pe = PositionalEncoding(hidden_size)
-        self.emb_dropout = nn.Dropout(p=emb_dropout)
+#        self.layer_norm = nn.LayerNorm(hidden_size, eps=1e-6)
+#        self.pe = PositionalEncoding(hidden_size)
+#        self.emb_dropout = nn.Dropout(p=emb_dropout)
 
-        self._output_size = hidden_size
+#        self._output_size = hidden_size
 
-        if freeze:
-            freeze_params(self)
+#        if freeze:
+#            freeze_params(self)
 
     # pylint: disable=arguments-differ
     def forward(
@@ -232,16 +233,7 @@ class TransformerEncoder(Encoder):
             - hidden_concat: last hidden state with
                 shape (batch_size, directions*hidden)
         """
-        x = self.pe(embed_src)  # add position encoding to word embeddings
-        x = self.emb_dropout(x)
-
-        for layer in self.layers:
-            x = layer(x, mask)
-        return self.layer_norm(x), None
+        return embed_src, None
 
     def __repr__(self):
-        return "%s(num_layers=%r, num_heads=%r)" % (
-            self.__class__.__name__,
-            len(self.layers),
-            self.layers[0].src_src_att.num_heads,
-        )
+        return ""

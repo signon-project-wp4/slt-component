@@ -1,11 +1,15 @@
 #!/usr/bin/env python
+
+import os
+
+#os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+
 import torch
 
 torch.backends.cudnn.deterministic = True
 
 import argparse
 import numpy as np
-import os
 import shutil
 import time
 import queue
@@ -34,14 +38,24 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchtext.data import Dataset
 from typing import List, Dict
+from .tokeniser import Tokeniser
 
+import matplotlib.pyplot as plt
+
+
+def save_loss(plot_file_path, loss_values):
+    plt.figure()
+    plt.xlabel("Epoch")
+    plt.ylabel("Translation loss")
+    plt.plot(loss_values)
+    plt.savefig(plot_file_path)
 
 # pylint: disable=too-many-instance-attributes
 class TrainManager:
     """ Manages training loop, validations, learning rate scheduling
     and early stopping."""
 
-    def __init__(self, model: SignModel, config: dict) -> None:
+    def __init__(self, model: SignModel, tokeniser, config: dict) -> None:
         """
         Creates a new TrainManager for a model, specified as in configuration.
 
@@ -49,6 +63,8 @@ class TrainManager:
         :param config: dictionary containing the training configurations
         """
         train_config = config["training"]
+
+        self.plot_file_path = config["training"]["loss_plot_file"]
 
         # files for logging and storing
         self.model_dir = make_model_dir(
@@ -107,6 +123,8 @@ class TrainManager:
         self.early_stopping_metric = train_config.get(
             "early_stopping_metric", "eval_metric"
         )
+        
+        self.tokeniser = tokeniser
 
         # if we schedule after BLEU/chrf, we want to maximize it, else minimize
         # early_stopping_metric decides on how to find the early stopping point:
@@ -151,8 +169,6 @@ class TrainManager:
 
         # data & batch handling
         self.level = config["data"]["level"]
-        if self.level not in ["word", "bpe", "char"]:
-            raise ValueError("Invalid segmentation level': {}".format(self.level))
 
         self.shuffle = train_config.get("shuffle", True)
         self.epochs = train_config["epochs"]
@@ -201,10 +217,6 @@ class TrainManager:
             )
 
     def _get_recognition_params(self, train_config) -> None:
-        # NOTE (Cihan): The blank label is the silence index in the gloss vocabulary.
-        #   There is an assertion in the GlossVocabulary class's __init__.
-        #   This is necessary to do TensorFlow decoding, as it is hardcoded
-        #   Currently it is hardcoded as 0.
         self.gls_silence_token = self.model.gls_vocab.stoi[SIL_TOKEN]
         assert self.gls_silence_token == 0
 
@@ -353,6 +365,7 @@ class TrainManager:
             train=True,
             shuffle=self.shuffle,
         )
+        translation_losses = []
         epoch_no = None
         for epoch_no in range(self.epochs):
             self.logger.info("EPOCH %d", epoch_no + 1)
@@ -372,6 +385,7 @@ class TrainManager:
                 processed_txt_tokens = self.total_txt_tokens
                 epoch_translation_loss = 0
 
+            moving_loss = 0.
             for batch in iter(train_iter):
                 # reactivate training
                 # create a Batch object from torchtext batch
@@ -395,6 +409,8 @@ class TrainManager:
                 recognition_loss, translation_loss = self._train_batch(
                     batch, update=update
                 )
+
+                moving_loss += translation_loss / len(train_iter)
 
                 if self.do_recognition:
                     self.tb_writer.add_scalar(
@@ -456,12 +472,9 @@ class TrainManager:
                 # validate on the entire dev set
                 if self.steps % self.validation_freq == 0 and update:
                     valid_start_time = time.time()
-                    # TODO (Cihan): There must be a better way of passing
-                    #   these recognition only and translation only parameters!
-                    #   Maybe have a NamedTuple with optional fields?
-                    #   Hmm... Future Cihan's problem.
                     val_res = validate_on_data(
                         model=self.model,
+                        tokeniser=self.tokeniser,
                         data=valid_data,
                         batch_size=self.eval_batch_size,
                         use_cuda=self.use_cuda,
@@ -690,6 +703,10 @@ class TrainManager:
 
                 if self.stop:
                     break
+            
+            translation_losses.append(float(moving_loss.cpu().detach().numpy()))
+            save_loss(self.model_dir + '/' + self.plot_file_path, translation_losses)
+            
             if self.stop:
                 if (
                     self.scheduler is not None
@@ -768,9 +785,6 @@ class TrainManager:
         else:
             normalized_translation_loss = 0
 
-        # TODO (Cihan): Add Gloss Token normalization (?)
-        #   I think they are already being normalized by batch
-        #   I need to think about if I want to normalize them by token.
         if self.do_recognition:
             normalized_recognition_loss = recognition_loss / self.batch_multiplier
         else:
@@ -962,7 +976,6 @@ class TrainManager:
             for seq, hyp in zip(sequence_ids, hypotheses):
                 opened_file.write("{}|{}\n".format(seq, hyp))
 
-
 def train(cfg_file: str) -> None:
     """
     Main training function. After training, also test on test data if given.
@@ -974,15 +987,18 @@ def train(cfg_file: str) -> None:
     # set the random seed
     set_seed(seed=cfg["training"].get("random_seed", 42))
 
+    tokeniser = Tokeniser(cfg["data"])
+    
     train_data, dev_data, test_data, gls_vocab, txt_vocab = load_data(
-        data_cfg=cfg["data"]
+        data_cfg=cfg["data"], tokeniser=tokeniser
     )
 
     # build model and load parameters into it
     do_recognition = cfg["training"].get("recognition_loss_weight", 1.0) > 0.0
     do_translation = cfg["training"].get("translation_loss_weight", 1.0) > 0.0
     model = build_model(
-        cfg=cfg["model"],
+        cfg=cfg,
+        tokeniser=tokeniser,
         gls_vocab=gls_vocab,
         txt_vocab=txt_vocab,
         sgn_dim=sum(cfg["data"]["feature_size"])
@@ -993,7 +1009,7 @@ def train(cfg_file: str) -> None:
     )
 
     # for training management, e.g. early stopping and model selection
-    trainer = TrainManager(model=model, config=cfg)
+    trainer = TrainManager(model=model, tokeniser=tokeniser, config=cfg)
 
     # store copy of original training config in model dir
     shutil.copy2(cfg_file, trainer.model_dir + "/config.yaml")
@@ -1031,7 +1047,6 @@ def train(cfg_file: str) -> None:
     logger = trainer.logger
     del trainer
     test(cfg_file, ckpt=ckpt, output_path=output_path, logger=logger)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Joey-NMT")

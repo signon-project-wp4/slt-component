@@ -1,6 +1,6 @@
 import math
 import torch
-
+import numpy as np
 from torch import nn, Tensor
 import torch.nn.functional as F
 from signjoey.helpers import freeze_params
@@ -171,6 +171,7 @@ class SpatialEmbeddings(nn.Module):
     # pylint: disable=unused-argument
     def __init__(
         self,
+        data_cfg,
         embedding_dim: int,
         input_size: int,
         num_heads: int,
@@ -222,14 +223,8 @@ class SpatialEmbeddings(nn.Module):
         :param x: input frame features
         :return: embedded representation for `x`
         """
-
+        
         x = self.ln(x)
-
-        if self.norm_type:
-            x = self.norm(x, mask)
-
-        if self.activation_type:
-            x = self.activation(x)
 
         if self.scale:
             return x * self.scale_factor

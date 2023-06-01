@@ -14,6 +14,7 @@ from torchtext.data import Dataset
 from signjoey.loss import XentLoss
 from signjoey.helpers import (
     bpe_postprocess,
+    subword_postprocess,
     load_config,
     get_latest_checkpoint,
     load_checkpoint,
@@ -27,11 +28,12 @@ from signjoey.phoenix_utils.phoenix_cleanup import (
     clean_phoenix_2014,
     clean_phoenix_2014_trans,
 )
-
+from .tokeniser import Tokeniser
 
 # pylint: disable=too-many-arguments,too-many-locals,no-member
 def validate_on_data(
     model: SignModel,
+    tokeniser,
     data: Dataset,
     batch_size: int,
     use_cuda: bool,
@@ -229,16 +231,24 @@ def validate_on_data(
                 valid_translation_loss = -1
                 valid_ppl = -1
             # decode back to symbols
-            decoded_txt = model.txt_vocab.arrays_to_sentences(arrays=all_txt_outputs)
+            decoded_txt = tokeniser.decode(all_txt_outputs)
+
             # evaluate with metric on full dataset
             join_char = " " if level in ["word", "bpe"] else ""
             # Construct text sequences for metrics
-            txt_ref = [join_char.join(t) for t in data.txt]
-            txt_hyp = [join_char.join(t) for t in decoded_txt]
+            if level == 'subword':
+                txt_ref = [join_char.join(tokeniser.decode(t)) for t in data.txt]
+                txt_hyp = [join_char.join(t) for t in decoded_txt]
+            else:
+                txt_ref = [join_char.join(t) for t in data.txt]
+                txt_hyp = [join_char.join(t) for t in decoded_txt] 
             # post-process
             if level == "bpe":
                 txt_ref = [bpe_postprocess(v) for v in txt_ref]
                 txt_hyp = [bpe_postprocess(v) for v in txt_hyp]
+            elif level == "subword":
+                txt_ref = [subword_postprocess(v) for v in txt_ref]
+                txt_hyp = [subword_postprocess(v) for v in txt_hyp]
             assert len(txt_ref) == len(txt_hyp)
 
             # TXT Metrics
@@ -320,8 +330,10 @@ def test(
         "translation_max_output_length", None
     )
 
+    tokeniser = Tokeniser(cfg['data'])
+
     # load the data
-    _, dev_data, test_data, gls_vocab, txt_vocab = load_data(data_cfg=cfg["data"])
+    _, dev_data, test_data, gls_vocab, txt_vocab = load_data(data_cfg=cfg["data"], tokeniser=tokeniser)
 
     # load model state from disk
     model_checkpoint = load_checkpoint(ckpt, use_cuda=use_cuda)
@@ -330,7 +342,8 @@ def test(
     do_recognition = cfg["training"].get("recognition_loss_weight", 1.0) > 0.0
     do_translation = cfg["training"].get("translation_loss_weight", 1.0) > 0.0
     model = build_model(
-        cfg=cfg["model"],
+        cfg=cfg,
+        tokeniser=tokeniser,
         gls_vocab=gls_vocab,
         txt_vocab=txt_vocab,
         sgn_dim=sum(cfg["data"]["feature_size"])
@@ -346,8 +359,6 @@ def test(
 
     # Data Augmentation Parameters
     frame_subsampling_ratio = cfg["data"].get("frame_subsampling_ratio", None)
-    # Note (Cihan): we are not using 'random_frame_subsampling' and
-    #   'random_frame_masking_ratio' in testing as they are just for training.
 
     # whether to use beam search for decoding, 0: greedy decoding
     if "testing" in cfg.keys():
@@ -379,7 +390,6 @@ def test(
         if use_cuda:
             translation_loss_function.cuda()
 
-    # NOTE (Cihan): Currently Hardcoded to be 0 for TensorFlow decoding
     assert model.gls_vocab.stoi[SIL_TOKEN] == 0
 
     if do_recognition:
@@ -393,6 +403,7 @@ def test(
             logger.info("[DEV] partition [RECOGNITION] experiment [BW]: %d", rbw)
             dev_recognition_results[rbw] = validate_on_data(
                 model=model,
+                tokeniser=tokeniser,
                 data=dev_data,
                 batch_size=batch_size,
                 use_cuda=use_cuda,
@@ -456,6 +467,7 @@ def test(
             for ta in translation_beam_alphas:
                 dev_translation_results[tbw][ta] = validate_on_data(
                     model=model,
+                    tokeniser=tokeniser,
                     data=dev_data,
                     batch_size=batch_size,
                     use_cuda=use_cuda,
@@ -559,6 +571,7 @@ def test(
 
     test_best_result = validate_on_data(
         model=model,
+        tokeniser=tokeniser,
         data=test_data,
         batch_size=batch_size,
         use_cuda=use_cuda,

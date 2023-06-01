@@ -13,13 +13,14 @@ __all__ = ["greedy", "transformer_greedy", "beam_search"]
 
 
 def greedy(
+    encoder_input: Tensor,
     src_mask: Tensor,
     embed: Embeddings,
     bos_index: int,
     eos_index: int,
     max_output_length: int,
     decoder: Decoder,
-    encoder_output: Tensor,
+    #encoder_output: Tensor,
     encoder_hidden: Tensor,
 ) -> (np.array, np.array):
     """
@@ -46,13 +47,13 @@ def greedy(
         greedy_fun = recurrent_greedy
 
     return greedy_fun(
+        encoder_input=encoder_input,
         src_mask=src_mask,
         embed=embed,
         bos_index=bos_index,
         eos_index=eos_index,
         max_output_length=max_output_length,
         decoder=decoder,
-        encoder_output=encoder_output,
         encoder_hidden=encoder_hidden,
     )
 
@@ -127,13 +128,13 @@ def recurrent_greedy(
 
 # pylint: disable=unused-argument
 def transformer_greedy(
+    encoder_input: Tensor,
     src_mask: Tensor,
     embed: Embeddings,
     bos_index: int,
     eos_index: int,
     max_output_length: int,
     decoder: Decoder,
-    encoder_output: Tensor,
     encoder_hidden: Tensor,
 ) -> (np.array, None):
     """
@@ -156,8 +157,9 @@ def transformer_greedy(
     batch_size = src_mask.size(0)
 
     # start with BOS-symbol for each sentence in the batch
-    ys = encoder_output.new_full([batch_size, 1], bos_index, dtype=torch.long)
-
+    ys = torch.zeros((batch_size, 1), dtype=torch.long, device=encoder_input.device)
+    ys.fill_(bos_index)
+    
     # a subsequent mask is intersected with this in decoder forward pass
     trg_mask = src_mask.new_ones([1, 1, 1])
     finished = src_mask.new_zeros((batch_size)).byte()
@@ -169,8 +171,8 @@ def transformer_greedy(
         # pylint: disable=unused-variable
         with torch.no_grad():
             logits, out, _, _ = decoder(
+                encoder_input=encoder_input,
                 trg_embed=trg_embed,
-                encoder_output=encoder_output,
                 encoder_hidden=None,
                 src_mask=src_mask,
                 unroll_steps=None,
@@ -201,7 +203,7 @@ def beam_search(
     bos_index: int,
     eos_index: int,
     pad_index: int,
-    encoder_output: Tensor,
+    encoder_input: Tensor,
     encoder_hidden: Tensor,
     src_mask: Tensor,
     max_output_length: int,
@@ -250,26 +252,27 @@ def beam_search(
     if hidden is not None:
         hidden = tile(hidden, size, dim=1)  # layers x batch*k x dec_hidden_size
 
-    encoder_output = tile(
-        encoder_output.contiguous(), size, dim=0
+    encoder_input = tile(
+        encoder_input.contiguous(), size, dim=0
     )  # batch*k x src_len x enc_hidden_size
+    
     src_mask = tile(src_mask, size, dim=0)  # batch*k x 1 x src_len
 
     # Transformer only: create target mask
     if transformer:
-        trg_mask = src_mask.new_ones([1, 1, 1])  # transformer only
+        trg_mask = src_mask.new_ones([1, 1])  # transformer only
     else:
         trg_mask = None
 
     # numbering elements in the batch
     batch_offset = torch.arange(
-        batch_size, dtype=torch.long, device=encoder_output.device
+        batch_size, dtype=torch.long, device=encoder_input.device
     )
 
     # numbering elements in the extended batch, i.e. beam size copies of each
     # batch element
     beam_offset = torch.arange(
-        0, batch_size * size, step=size, dtype=torch.long, device=encoder_output.device
+        0, batch_size * size, step=size, dtype=torch.long, device=encoder_input.device
     )
 
     # keeps track of the top beam size hypotheses to expand for each element
@@ -278,11 +281,11 @@ def beam_search(
         [batch_size * size, 1],
         bos_index,
         dtype=torch.long,
-        device=encoder_output.device,
+        device=encoder_input.device,
     )
 
     # Give full probability to the first beam on the first step.
-    topk_log_probs = torch.zeros(batch_size, size, device=encoder_output.device)
+    topk_log_probs = torch.zeros(batch_size, size, device=encoder_input.device)
     topk_log_probs[:, 1:] = float("-inf")
 
     # Structure that holds finished hypotheses.
@@ -295,7 +298,6 @@ def beam_search(
     }
 
     for step in range(max_output_length):
-
         # This decides which part of the predicted sentence we feed to the
         # decoder to make the next prediction.
         # For Transformer, we feed the complete predicted sentence so far.
@@ -310,8 +312,9 @@ def beam_search(
         # logits: logits for final softmax
         # pylint: disable=unused-variable
         trg_embed = embed(decoder_input)
+       
         logits, hidden, att_scores, att_vectors = decoder(
-            encoder_output=encoder_output,
+            encoder_input=encoder_input,
             encoder_hidden=encoder_hidden,
             src_mask=src_mask,
             trg_embed=trg_embed,
@@ -338,7 +341,7 @@ def beam_search(
         if alpha > -1:
             length_penalty = ((5.0 + (step + 1)) / 6.0) ** alpha
             curr_scores /= length_penalty
-
+        
         # flatten log_probs into a list of possibilities
         curr_scores = curr_scores.reshape(-1, size * decoder.output_size)
 
@@ -359,7 +362,7 @@ def beam_search(
         batch_index = topk_beam_index + beam_offset[
             : topk_beam_index.size(0)
         ].unsqueeze(1)
-        select_indices = batch_index.view(-1)
+        select_indices = batch_index.view(-1).long()
 
         # append latest prediction
         alive_seq = torch.cat(
@@ -414,8 +417,8 @@ def beam_search(
             )
 
         # reorder indices, outputs and masks
-        select_indices = batch_index.view(-1)
-        encoder_output = encoder_output.index_select(0, select_indices)
+        select_indices = batch_index.view(-1).long()
+        encoder_input = encoder_input.index_select(0, select_indices)
         src_mask = src_mask.index_select(0, select_indices)
 
         if hidden is not None and not transformer:

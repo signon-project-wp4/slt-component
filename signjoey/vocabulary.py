@@ -44,7 +44,11 @@ class Vocabulary:
         tokens = []
         with open(file, "r", encoding="utf-8") as open_file:
             for line in open_file:
-                tokens.append(line.strip("\n"))
+                l = line.strip("\n").split('\t')
+                if len(l) > 1:
+                    tokens.append(l[1])
+                else:
+                    tokens.append(line.strip("\n"))
         self._from_list(tokens)
 
     def __str__(self) -> str:
@@ -87,7 +91,7 @@ class Vocabulary:
 
 
 class TextVocabulary(Vocabulary):
-    def __init__(self, tokens: List[str] = None, file: str = None):
+    def __init__(self, cfg, tokens: List[str] = None, file: str = None):
         """
         Create vocabulary from list of tokens or file.
 
@@ -98,7 +102,7 @@ class TextVocabulary(Vocabulary):
         :param file: file to load vocabulary from
         """
         super().__init__()
-        self.specials = [UNK_TOKEN, PAD_TOKEN, BOS_TOKEN, EOS_TOKEN]
+        self.specials = []
         self.DEFAULT_UNK_ID = lambda: 0
         self.stoi = defaultdict(self.DEFAULT_UNK_ID)
 
@@ -160,9 +164,6 @@ class GlossVocabulary(Vocabulary):
         elif file is not None:
             self._from_file(file)
 
-        # TODO (Cihan): This bit is hardcoded so that the silence token
-        #   is the first label to be able to do CTC calculations (decoding etc.)
-        #   Might fix in the future.
         assert self.stoi[SIL_TOKEN] == 0
 
     def arrays_to_sentences(self, arrays: np.array) -> List[List[str]]:
@@ -192,7 +193,7 @@ def sort_and_cut(counter: Counter, limit: int):
 
 
 def build_vocab(
-    field: str, max_size: int, min_freq: int, dataset: Dataset, vocab_file: str = None
+    cfg, field: str, max_size: int, min_freq: int, dataset: Dataset, vocab_file: str = None
 ) -> Vocabulary:
     """
     Builds vocabulary for a torchtext `field` from given`dataset` or
@@ -212,7 +213,7 @@ def build_vocab(
         if field == "gls":
             vocab = GlossVocabulary(file=vocab_file)
         elif field == "txt":
-            vocab = TextVocabulary(file=vocab_file)
+            vocab = TextVocabulary(cfg=cfg, file=vocab_file)
         else:
             raise ValueError("Unknown vocabulary type")
     else:
@@ -234,7 +235,7 @@ def build_vocab(
         if field == "gls":
             vocab = GlossVocabulary(tokens=vocab_tokens)
         elif field == "txt":
-            vocab = TextVocabulary(tokens=vocab_tokens)
+            vocab = TextVocabulary(cfg=cfg, tokens=vocab_tokens)
         else:
             raise ValueError("Unknown vocabulary type")
 
@@ -244,5 +245,4 @@ def build_vocab(
     for i, s in enumerate(vocab.specials):
         if i != vocab.DEFAULT_UNK_ID():
             assert not vocab.is_unk(s)
-
     return vocab

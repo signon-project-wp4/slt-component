@@ -127,6 +127,8 @@ def initialize_model(model: nn.Module, cfg: dict, txt_padding_idx: int) -> None:
 
     with torch.no_grad():
         for name, p in model.named_parameters():
+            if 'encoder' in name or 'decoder' in name or 'txt_embed' in name:
+                continue
 
             if "txt_embed" in name:
                 if "lut" in name:
